@@ -1,208 +1,118 @@
 // utils/scoring.js
 
 /**
- * IMPROVED SCORING ALGORITHM (v2)
- * --------------------------------
- * Features added:
- * - Weighted + semantic keyword scoring
- * - Filler ratio instead of raw filler count
- * - Structure scoring (intro, example, conclusion)
- * - Fluency scoring using sentence length & filler ratio
- * - Completeness scoring using word count + lexical diversity
- * - Basic grammar scoring (run-on detection)
- * - Actionable, detailed feedback generation
+ * scoreAnswer()
+ * ---------------
+ * Generates a score (0–10) based on:
+ * - Keyword match
+ * - Filler word presence
+ * - Fluency (words per second estimate)
+ * - Completeness (word count)
  */
 
-/**
- * Helper: Normalize text
- */
-const normalize = (str) =>
-  str.toLowerCase().replace(/\s+/g, " ").trim();
+export const scoreAnswer = (transcript = "", expectedKeywords = []) => {
+  transcript = transcript.toLowerCase().trim();
 
-/**
- * Helper: Check semantic keyword match
- */
-const matchesSemantic = (transcript, keywordObj) => {
-  const { word, synonyms = [] } = keywordObj;
-  const all = [word.toLowerCase(), ...synonyms.map((s) => s.toLowerCase())];
-  return all.some((w) => transcript.includes(w));
-};
+  if (!transcript || transcript.length === 0) {
+    return 0; // no answer
+  }
 
-/**
- * Helper: Calculate filler ratio
- */
-const getFillerStats = (transcript) => {
-  const fillers = [
-    "um", "uh", "like", "you know", "umm", "actually", "basically",
-    "i mean", "kinda", "sort of", "right?", "so"
-  ];
+  const words = transcript.split(/\s+/).filter(w => w.length > 0);
 
-  const fillerRegex = new RegExp(`\\b(${fillers.join("|")})\\b`, "gi");
-  const matches = transcript.match(fillerRegex) || [];
-
-  return matches.length;
-};
-
-/**
- * Helper: Sentence segmentation
- */
-const splitSentences = (text) =>
-  text.split(/[.!?]+/).map(s => s.trim()).filter(s => s.length > 0);
-
-/**
- * Main scoring function
- */
-export const scoreAnswer = (rawTranscript = "", expectedKeywords = []) => {
-  const transcript = normalize(rawTranscript);
-
-  if (!transcript) return 0;
-
-  const words = transcript.split(" ");
-  const wordCount = words.length;
-
-  // ---------------------------------------------------------------------
-  // 1. WEIGHTED KEYWORD SCORE (40%)
-  // ---------------------------------------------------------------------
-  let matchedWeight = 0;
-  let totalWeight = 0;
-
+  // ---------------------------
+  // 1. Keyword score (40%)
+  // ---------------------------
+  let keywordHits = 0;
   expectedKeywords.forEach((kw) => {
-    totalWeight += kw.weight ?? 1;
-    if (matchesSemantic(transcript, kw)) matchedWeight += (kw.weight ?? 1);
+    if (transcript.includes(kw.toLowerCase())) {
+      keywordHits++;
+    }
   });
 
   const keywordScore =
-    totalWeight === 0 ? 10 : (matchedWeight / totalWeight) * 10;
+    expectedKeywords.length === 0
+      ? 10
+      : (keywordHits / expectedKeywords.length) * 10;
 
-  // ---------------------------------------------------------------------
-  // 2. FILLER RATIO (5% penalty via fluency)
-  // ---------------------------------------------------------------------
-  const fillerCount = getFillerStats(transcript);
-  const fillerRatio = fillerCount / Math.max(wordCount, 1);
+  // ---------------------------
+  // 2. Filler word penalty (affects fluency)
+  // ---------------------------
+  const fillers = transcript.match(/\b(um|uh|like|you know|umm)\b/gi) || [];
+  const fillerCount = fillers.length;
+  const fillerPenalty = Math.min(3, fillerCount); // cap penalty
 
-  // ---------------------------------------------------------------------
-  // 3. FLUENCY SCORE (20%)
-  // Uses:
-  // - sentence length
-  // - filler ratio
-  // - run-on detection
-  // ---------------------------------------------------------------------
-  const sentences = splitSentences(transcript);
+  // ---------------------------
+  // 3. Fluency score (25%)
+  // Ideal pace ~ 130–170 wpm → approx 2–3 words/sec (rough estimate)
+  // ---------------------------
+  const estimatedDurationSeconds = words.length / 2; 
+  const wordsPerSec = words.length / Math.max(estimatedDurationSeconds, 1);
 
   let fluencyScore = 10;
 
-  // Too many long sentences (25+ words)
-  const longSentences = sentences.filter((s) => s.split(" ").length > 25).length;
-  if (longSentences >= 2) fluencyScore -= 2;
+  // penalize if speaking too slow or too fast
+  if (wordsPerSec < 1) fluencyScore -= 3;    // too slow
+  if (wordsPerSec > 4) fluencyScore -= 2;    // too fast
 
-  // Very short sentences → choppy
-  const shortSentences = sentences.filter((s) => s.split(" ").length <= 4).length;
-  if (shortSentences > 3) fluencyScore -= 1;
-
-  // Filler penalty
-  if (fillerRatio > 0.03) fluencyScore -= 2;
-  if (fillerRatio > 0.06) fluencyScore -= 3;
-
+  fluencyScore -= fillerPenalty; // filler penalty affects fluency
   fluencyScore = Math.max(0, fluencyScore);
 
-  // ---------------------------------------------------------------------
-  // 4. STRUCTURE SCORE (20%)
-  // Check for:
-  // intro, explanation, example, conclusion
-  // ---------------------------------------------------------------------
-  let structureScore = 0;
+  // ---------------------------
+  // 4. Completeness score (20%)
+  // 40+ words considered a complete answer
+  // ---------------------------
+  const completenessScore = Math.min(10, (words.length / 40) * 10);
 
-  if (transcript.startsWith("so") || transcript.startsWith("the") || transcript.startsWith("in my opinion"))
-    structureScore += 2; // intro
-
-  if (transcript.includes("because") || transcript.includes("this means"))
-    structureScore += 3; // explanation
-
-  if (transcript.includes("for example") || transcript.includes("for instance"))
-    structureScore += 3; // example
-
-  if (transcript.includes("in summary") || transcript.includes("overall"))
-    structureScore += 2; // conclusion
-
-  structureScore = Math.min(10, structureScore);
-
-  // ---------------------------------------------------------------------
-  // 5. COMPLETENESS SCORE (15%)
-  // Combines:
-  // - word count target (40–80 optimal)
-  // - lexical diversity check
-  // ---------------------------------------------------------------------
-  let completenessScore = 0;
-
-  // Word count scaling (target 40+)
-  completenessScore += Math.min(10, (wordCount / 40) * 7);
-
-  // Diversity (unique words / total)
-  const uniqueWords = new Set(words).size;
-  const diversity = uniqueWords / wordCount;
-
-  if (diversity > 0.55) completenessScore += 3;
-  completenessScore = Math.min(10, completenessScore);
-
-  // ---------------------------------------------------------------------
-  // FINAL WEIGHTED SCORE
-  // ---------------------------------------------------------------------
+  // ---------------------------
+  // 5. Final weighted score
+  // ---------------------------
   const finalScore =
     keywordScore * 0.4 +
-    fluencyScore * 0.2 +
-    structureScore * 0.2 +
-    completenessScore * 0.15;
+    fluencyScore * 0.25 +
+    completenessScore * 0.35;
 
-  return Math.round(finalScore * 10) / 10;
+  return Math.round(finalScore * 10) / 10; // round to 1 decimal
 };
 
+
 /**
- * Feedback generator (detailed and actionable)
+ * generateFeedback()
+ * -------------------
+ * Generates textual feedback based on keyword misses,
+ * filler words, completeness, and fluency.
  */
-export const generateFeedback = (rawTranscript = "", expectedKeywords = []) => {
-  const transcript = normalize(rawTranscript);
-  const words = transcript.split(" ");
-  const wordCount = words.length;
+
+export const generateFeedback = (transcript = "", expectedKeywords = []) => {
+  transcript = transcript.toLowerCase();
 
   let feedback = [];
 
-  // ------------------------------------------------------
-  // Missing keyword feedback
-  // ------------------------------------------------------
-  const missing = expectedKeywords
-    .filter((kw) => !matchesSemantic(transcript, kw))
-    .map((kw) => kw.word);
+  // Keyword feedback
+  const missingKeywords = expectedKeywords.filter(
+    (kw) => !transcript.includes(kw.toLowerCase())
+  );
+  if (missingKeywords.length > 0) {
+    feedback.push(`Try including: ${missingKeywords.join(", ")}`);
+  } else {
+    feedback.push("Great! You covered all the key concepts.");
+  }
 
-  if (missing.length)
-    feedback.push(`Try including key points such as: ${missing.join(", ")}.`);
-  else
-    feedback.push("Great job! You covered all the important concepts.");
+  // Filler words
+  const fillerMatches = transcript.match(/\b(um|uh|like|you know|umm)\b/gi) || [];
+  if (fillerMatches.length > 2) {
+    feedback.push("Try reducing filler words like 'um', 'uh', 'like'.");
+  }
 
-  // ------------------------------------------------------
-  // Filler feedback
-  // ------------------------------------------------------
-  const fillerCount = getFillerStats(transcript);
-  const fillerRatio = fillerCount / Math.max(wordCount, 1);
+  // Completeness
+  const wordCount = transcript.split(/\s+/).length;
+  if (wordCount < 25) {
+    feedback.push("Try giving a more detailed answer with examples.");
+  }
 
-  if (fillerRatio > 0.05)
-    feedback.push(`Try reducing filler words. Your filler ratio is ${(fillerRatio * 100).toFixed(1)}%.`);
-
-  // ------------------------------------------------------
-  // Completeness feedback
-  // ------------------------------------------------------
-  if (wordCount < 25)
-    feedback.push("Try providing a more detailed explanation with examples.");
-  else if (wordCount > 90)
-    feedback.push("Try being more concise and stick to the core points.");
-
-  // ------------------------------------------------------
-  // Structure feedback
-  // ------------------------------------------------------
-  if (!transcript.includes("for example"))
-    feedback.push("Add an example to strengthen your answer.");
-
-  if (!transcript.includes("in summary") && !transcript.includes("overall"))
-    feedback.push("End with a short conclusion to summarize your points.");
+  // Fluency
+  if (wordCount > 80) {
+    feedback.push("Try being more concise and sticking to the main points.");
+  }
 
   return feedback;
 };
